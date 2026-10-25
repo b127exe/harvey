@@ -51,7 +51,7 @@ BRAIN_STATUS_KEY = "brain_status"
 # Brain stops starting runtimes until something changes.
 _PERSISTENT_CODEX_KINDS = {"setup", "auth", "isolation"}
 # OpenCode's taxonomy has no isolation layer; the same two pause it.
-_OPENCODE_PERSISTENT_KINDS = ("setup", "auth")
+_OPENCODE_PERSISTENT_KINDS = {"setup", "auth"}
 # Re-check a paused provider at least this often even if nothing changed
 # on disk (e.g. a managed config layer was fixed).
 PROVIDER_RECHECK_SECONDS = 1800
@@ -124,27 +124,65 @@ class Brain:
     async def preflight(self) -> str:
         """Can this Brain be used right now? Returns "" or the reason not.
 
-        Codex only (Claude keeps its existing behaviour): runs the adapter's
-        full pre-prompt check (CodexClient.preflight): CLI version, route and
-        lockdown attested with no login in the runtime, the native login read
-        only (expiry, renewal), then with the access-only copy the configured
-        model against the catalog, the ChatGPT account, and a started
-        tool-less thread. No turn, so no inference; nothing is written to the
-        native login. While paused, the check is repeated only when the login
-        file or the Codex executable changes, or every
-        PROVIDER_RECHECK_SECONDS, so a persistent problem doesn't start
-        runtimes every heartbeat.
+        Checked providers only (Claude keeps its behaviour: it verifies by
+        its first call). Codex runs the adapter's full pre-prompt check
+        (CodexClient.preflight): CLI version, route and lockdown attested
+        with no login in the runtime, the native login read only (expiry,
+        renewal), then with the access-only copy the configured model
+        against the catalog, the ChatGPT account, and a started tool-less
+        thread. OpenCode checks CLI presence, version and credentials with
+        no prompt sent. No turn in either case, so no inference.
+        While paused, the check is repeated only when the status fingerprint
+        changes or every PROVIDER_RECHECK_SECONDS, so a persistent problem
+        doesn't start subprocesses every heartbeat.
         """
-        if self.provider != "codex":
+        if self.provider == "claude":
             return ""
-        from harvey.codex import CodexError
-
         await self._expire_usage_pause()
         if self.unavailable:
-            unchanged = self.codex.fingerprint() == self._unavailable_fingerprint
+            unchanged = self._status_fingerprint() == self._unavailable_fingerprint
             recent = time.monotonic() - self._unavailable_at < PROVIDER_RECHECK_SECONDS
             if unchanged and recent:
                 return self.unavailable
+        if self.provider == "opencode":
+            return await self._preflight_opencode()
+        return await self._preflight_codex()
+
+    def _status_fingerprint(self) -> tuple:
+        """What the unavailable-pause remembers to detect a fix: Codex has a
+        rich runtime fingerprint; the one-shot providers only need enough
+        to notice a config change (provider + model)."""
+        if self.codex is not None:
+            return self.codex.fingerprint()
+        return (self.provider, self.model)
+
+    async def _preflight_opencode(self) -> str:
+        from harvey.opencode import OpenCodeError, preflight as opencode_preflight
+
+        try:
+            await opencode_preflight()
+        except OpenCodeError as e:
+            if e.kind in _OPENCODE_PERSISTENT_KINDS:
+                await self._mark_unavailable(e)
+                return self.unavailable
+            return str(e)  # transient: skip this cycle, check again next time
+        except Exception as e:
+            return f"OpenCode preflight failed unexpectedly ({type(e).__name__})."
+        if self.unavailable:
+            await self._mark_available()
+        elif not self._status_synced:
+            logger.info(
+                f"OpenCode ready: CLI present, credentials configured"
+                f"{', model ' + self.model if self.model else ''} (no prompt sent).")
+            self._status_synced = True
+            await self._restore_stored_status()
+        return ""
+
+    async def _preflight_codex(self) -> str:
+        from harvey.codex import CodexError
+
+        if self.codex is None:
+            return "Codex is not configured."
         try:
             await self.codex.preflight()
         except CodexError as e:
@@ -160,21 +198,25 @@ class Brain:
             logger.info(
                 f"Codex ready: supported CLI, isolation verified, login and account "
                 f"valid, model {self.model or 'auto'} usable with no tools (no prompt sent).")
-            # A pause recorded before a restart must not outlive the problem.
             self._status_synced = True
-            try:
-                stored = parse_brain_status(await self.state.get_setting(BRAIN_STATUS_KEY))
-            except Exception:
-                stored = {}
-            until = stored.get("until")
-            if (stored.get("status") == "paused" and stored.get("kind") == "usage_limit"
-                    and isinstance(until, (int, float)) and until > time.time()):
-                # Still inside a usage-limit pause recorded before a restart.
-                self._usage_limited_until = time.monotonic() + (until - time.time())
-                self._usage_pause_recorded = True
-            elif stored.get("status") == "paused":
-                await self._mark_available()
+            await self._restore_stored_status()
         return ""
+
+    async def _restore_stored_status(self):
+        """Re-honor a pause recorded before a restart (it must not outlive
+        the problem). Called once per process when the provider first passes."""
+        try:
+            stored = parse_brain_status(await self.state.get_setting(BRAIN_STATUS_KEY))
+        except Exception:
+            stored = {}
+        until = stored.get("until")
+        if (stored.get("status") == "paused" and stored.get("kind") == "usage_limit"
+                and isinstance(until, (int, float)) and until > time.time()):
+            # Still inside a usage-limit pause recorded before a restart.
+            self._usage_limited_until = time.monotonic() + (until - time.time())
+            self._usage_pause_recorded = True
+        elif stored.get("status") == "paused":
+            await self._mark_available()
 
     async def _start_usage_pause(self):
         self._usage_limited_until = time.monotonic() + USAGE_LIMIT_PAUSE_SECONDS
@@ -199,12 +241,7 @@ class Brain:
         first = not self.unavailable or self.unavailable != str(error)
         self.unavailable = str(error)
         self._unavailable_at = time.monotonic()
-        # Codex has a rich runtime fingerprint; the one-shot providers only
-        # need enough to notice a config change (provider + model).
-        if self.codex is not None:
-            self._unavailable_fingerprint = self.codex.fingerprint()
-        else:
-            self._unavailable_fingerprint = (self.provider, self.model)
+        self._unavailable_fingerprint = self._status_fingerprint()
         if first:
             await self._record_status("paused", self.unavailable,
                                       kind=getattr(error, "kind", ""))

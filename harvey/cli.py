@@ -199,6 +199,7 @@ def cmd_status(args):
         by_provider = summary.get("usage_today_by_provider", {})
         print(f"  Claude calls today:   {by_provider.get('claude', summary['usage_today'])}")
         print(f"  Codex calls today:    {by_provider.get('codex', 0)}")
+        print(f"  OpenCode calls today: {by_provider.get('opencode', 0)}")
         from harvey.brain import BRAIN_STATUS_KEY, Brain, active_brain_status
         from harvey.config import ConfigError, load_brain_config
         try:
@@ -226,11 +227,15 @@ def cmd_status(args):
                 elif brain.provider == "codex":
                     print(f"  Brain:                {label} ready (CLI, isolation, login, "
                           "model and account checked; no prompt sent)")
+                elif brain.provider == "opencode":
+                    print(f"  Brain:                {label} ready (CLI version and "
+                          "credentials checked; no prompt sent)")
                 else:
                     print(f"  Brain:                {label} (not checked: Claude is checked "
                           "by its first call)")
         elif brain_status.get("status") == "paused":
-            label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
+            from harvey.brain import PROVIDER_LABELS
+            label = PROVIDER_LABELS.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
         print()
@@ -272,7 +277,8 @@ def cmd_usage(args):
         except Exception:
             pass
 
-        label = {"claude": "Claude", "codex": "Codex"}.get(provider, "Brain")
+        from harvey.brain import PROVIDER_LABELS
+        label = PROVIDER_LABELS.get(provider, "Brain")
         print(f"\n  {label} Usage")
         print("  " + "=" * 52)
         if windows:
@@ -286,6 +292,9 @@ def cmd_usage(args):
                   "version, and network).")
         elif provider == "claude":
             print("  Quota gauge unavailable (run 'claude login' or check network).")
+        elif provider == "opencode":
+            print("  No subscription quota gauge — OpenCode usage lives outside Harvey.")
+            print("  See 'opencode stats' and your provider dashboard for spend.")
 
         totals = await state.usage_totals()
         print()
@@ -678,6 +687,8 @@ def main():
     sub.set_defaults(func=cmd_run)
 
     # harvey train <url>
+    from harvey.config import BRAIN_PROVIDERS
+
     sub = subparsers.add_parser("train", help="Train Harvey on a website")
     sub.add_argument("url", help="Website URL to crawl and learn from")
     sub.add_argument(
@@ -688,7 +699,7 @@ def main():
         help="Max pages to crawl (default: 100)",
     )
     sub.add_argument(
-        "--provider", choices=["claude", "codex"], default=None,
+        "--provider", choices=list(BRAIN_PROVIDERS), default=None,
         help="Subscription to think with (default: the one in your config, else claude)",
     )
     sub.add_argument("--model", default=None, help="Model for this provider (default: provider default)")
@@ -709,7 +720,7 @@ def main():
     sub.add_argument(
         "--check", action="store_true",
         help="Also check the configured brain now (Codex: CLI version, isolation "
-             "and login; no model call)",
+             "and login; OpenCode: CLI version and credentials; no model call)",
     )
     sub.set_defaults(func=cmd_status)
 
@@ -789,7 +800,7 @@ def main():
     sub.set_defaults(func=cmd_sending)
 
     # harvey usage
-    sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
+    sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude, Codex or OpenCode)")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")
     sub.set_defaults(func=cmd_usage)
 

@@ -647,6 +647,12 @@ def test_setup_writes_the_selection(tmp_path, monkeypatch):
     wizard._write_config()
     assert yaml.safe_load(config_file.read_text())["brain"] == {"provider": "claude"}
 
+    # ...and an OpenCode selection round-trips through the same write path.
+    wizard.brain_config = BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5")
+    wizard._write_config()
+    assert yaml.safe_load(config_file.read_text())["brain"] == {
+        "provider": "opencode", "model": "opencode-go/mimo-v2.5"}
+
 
 @pytest.mark.asyncio
 async def test_codex_setup_does_not_require_claude(monkeypatch, tmp_path):
@@ -663,7 +669,7 @@ async def test_codex_setup_does_not_require_claude(monkeypatch, tmp_path):
         assert brain.provider == "codex"
         return True
 
-    monkeypatch.setattr(setup_mod, "_test_claude", ready)
+    monkeypatch.setattr(setup_mod, "_test_brain", ready)
     answers = iter(["codex", ""])
     monkeypatch.setattr(setup_mod, "_ask", lambda *a, **k: next(answers))
     wizard = setup_mod.SetupWizard()
@@ -915,3 +921,167 @@ def test_cli_status_hides_another_providers_pause(monkeypatch, tmp_path, capsys)
                       config=BrainConfig(provider="codex", model="gpt-5.5"),
                       setting=_STALE_CODEX_PAUSE)
     assert "Codex PAUSED" in out
+
+
+# ── OpenCode surface: preflight, setup, status/usage CLI, train ──
+
+
+@pytest.mark.asyncio
+async def test_opencode_preflight_ready_then_sticky_auth_pause(state, monkeypatch):
+    import harvey.opencode as oc_mod
+
+    brain = Brain(state, BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5"))
+
+    async def ok():
+        return "1.19.4"
+
+    monkeypatch.setattr(oc_mod, "preflight", ok)
+    assert await brain.preflight() == ""
+
+    async def no_creds():
+        raise oc_mod.OpenCodeError("No credentials", kind="auth", retryable=False)
+
+    monkeypatch.setattr(oc_mod, "preflight", no_creds)
+    assert await brain.preflight()  # reason returned
+    assert brain.unavailable
+    assert brain.paused_reason
+
+    # Sticky: within the recheck window the CLI is not spawned again.
+    calls = {"n": 0}
+
+    async def should_not_run():
+        calls["n"] += 1
+        return "x"
+
+    monkeypatch.setattr(oc_mod, "preflight", should_not_run)
+    assert await brain.preflight()
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_opencode_transient_preflight_failure_is_not_sticky(state, monkeypatch):
+    import harvey.opencode as oc_mod
+
+    brain = Brain(state, BrainConfig(provider="opencode"))
+
+    async def flaky():
+        raise oc_mod.OpenCodeError("timed out", kind="transient", retryable=True)
+
+    monkeypatch.setattr(oc_mod, "preflight", flaky)
+    assert await brain.preflight()  # a reason for this cycle...
+    assert not brain.unavailable    # ...but no pause recorded
+    assert brain.paused_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_opencode_setup_does_not_require_claude_or_codex(monkeypatch, tmp_path):
+    import harvey.setup as setup_mod
+
+    monkeypatch.setattr(setup_mod, "_check_claude_cli", lambda: False)
+    monkeypatch.setattr(setup_mod, "_check_codex_cli", lambda: False)
+    monkeypatch.setattr(setup_mod, "_check_opencode_cli", lambda: True)
+    monkeypatch.setattr(setup_mod, "StateManager",
+                        lambda: StateManager(str(tmp_path / "s.db")))
+
+    async def oc_preflight():
+        return "1.19.4"
+
+    monkeypatch.setattr("harvey.opencode.preflight", oc_preflight)
+
+    async def ready(brain):
+        assert brain.provider == "opencode"
+        return True
+
+    monkeypatch.setattr(setup_mod, "_test_brain", ready)
+    answers = iter(["opencode", "opencode-go/mimo-v2.5"])
+    monkeypatch.setattr(setup_mod, "_ask", lambda *a, **k: next(answers))
+    wizard = setup_mod.SetupWizard()
+    await wizard._check_prerequisites()  # would SystemExit if claude/codex were required
+    assert wizard.brain_config == BrainConfig(
+        provider="opencode", model="opencode-go/mimo-v2.5")
+
+
+def test_setup_summary_labels_opencode(monkeypatch, capsys):
+    import harvey.setup as setup_mod
+
+    monkeypatch.setattr(setup_mod, "_check_opencode_cli", lambda: True)
+    wizard = setup_mod.SetupWizard()
+    wizard.brain_config = BrainConfig(provider="opencode")
+    asyncio.run(wizard._print_summary())
+    out = capsys.readouterr().out
+    assert "OpenCode CLI" in out
+
+
+def test_cli_status_check_reports_opencode_readiness(monkeypatch, tmp_path, capsys):
+    async def ready(self):
+        return ""
+
+    monkeypatch.setattr(brain_mod.Brain, "preflight", ready)
+    out = _status_cli(monkeypatch, tmp_path, capsys, check=True,
+                      config=BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5"))
+    assert "OpenCode (opencode-go/mimo-v2.5) ready" in out
+
+
+def test_cli_status_shows_opencode_calls_today(monkeypatch, tmp_path, capsys):
+    out = _status_cli(monkeypatch, tmp_path, capsys, check=False,
+                      config=BrainConfig(provider="opencode"))
+    assert "OpenCode calls today" in out
+
+
+def test_cli_usage_opencode_reports_calls_without_quota(monkeypatch, tmp_path, capsys):
+    import harvey.cli as cli
+    import harvey.config as config_mod
+    import harvey.integrations.quota as quota_mod
+    import harvey.state as state_mod
+
+    monkeypatch.setattr(config_mod, "load_brain_config",
+                        lambda: BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5"))
+    monkeypatch.setattr(state_mod, "StateManager",
+                        lambda: StateManager(str(tmp_path / "u.db")))
+
+    class NoQuota:
+        async def get_utilization(self):
+            raise AssertionError("No quota client must be read for OpenCode")
+
+    monkeypatch.setattr(quota_mod, "QuotaClient", NoQuota)
+    cli.cmd_usage(type("A", (), {"days": 30})())
+    out = capsys.readouterr().out
+    assert "OpenCode Usage" in out
+    assert "Claude Usage" not in out and "Codex Usage" not in out
+    assert "opencode stats" in out  # where spend actually lives
+
+
+def test_cli_train_accepts_opencode_provider(monkeypatch, tmp_path):
+    import sys
+    import harvey.cli as cli
+    import harvey.config as config_mod
+    import harvey.trainer as trainer_mod
+
+    seen = {}
+
+    class FakeTrainer:
+        def __init__(self, brain_config=None):
+            seen["config"] = brain_config
+
+        async def train(self, url, max_pages=100):
+            seen["url"] = url
+
+    monkeypatch.setattr(trainer_mod, "Trainer", FakeTrainer)
+    monkeypatch.setattr(config_mod, "load_brain_config", lambda: BrainConfig())
+    monkeypatch.setattr(sys, "argv",
+                        ["harvey", "train", "acme.com", "--provider", "opencode"])
+    cli.main()
+    assert seen["config"].provider == "opencode"
+    # Switching to opencode never inherits another provider's model either.
+    monkeypatch.setattr(config_mod, "load_brain_config",
+                        lambda: BrainConfig(provider="codex", model="gpt-5.5"))
+    monkeypatch.setattr(sys, "argv",
+                        ["harvey", "train", "acme.com", "--provider", "opencode"])
+    cli.main()
+    assert seen["config"] == BrainConfig(provider="opencode")  # gpt-5.5 dropped
+    # invalid provider still rejected by argparse
+    monkeypatch.setattr(sys, "argv",
+                        ["harvey", "train", "acme.com", "--provider", "gemini"])
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main()
+    assert exit_info.value.code == 2

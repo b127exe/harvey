@@ -77,8 +77,13 @@ def _check_codex_cli() -> bool:
     return shutil.which("codex") is not None
 
 
-async def _test_claude(brain: Brain) -> bool:
-    """Test that the configured brain answers (Claude or Codex)."""
+def _check_opencode_cli() -> bool:
+    """Check if OpenCode CLI is installed and accessible."""
+    return shutil.which("opencode") is not None
+
+
+async def _test_brain(brain: Brain) -> bool:
+    """Test that the configured brain answers (Claude, Codex or OpenCode)."""
     response = await brain.think(
         "Respond with exactly: HARVEY_READY",
         session_id="harvey-setup-test",
@@ -89,10 +94,11 @@ async def _test_claude(brain: Brain) -> bool:
 def _ask_brain_config() -> BrainConfig:
     """Ask which subscription Harvey thinks with. Claude is the default."""
     _print_harvey("I think with an AI subscription you already pay for:")
-    print("    claude — your Claude plan, via Claude Code (default)")
-    print("    codex  — your ChatGPT plan, via the Codex CLI")
+    print("    claude   — your Claude plan, via Claude Code (default)")
+    print("    codex    — your ChatGPT plan, via the Codex CLI")
+    print("    opencode — your OpenCode providers (MiMo, DeepSeek, ...), any OS")
     while True:
-        provider = _ask("Which one? (claude/codex)", default="claude").lower()
+        provider = _ask("Which one? (claude/codex/opencode)", default="claude").lower()
         if provider == "codex":
             from harvey.codex import CodexError, require_supported_platform
             try:
@@ -100,22 +106,32 @@ def _ask_brain_config() -> BrainConfig:
             except CodexError as e:
                 print(f"    ({e})")
                 continue
-        if provider in ("claude", "codex"):
+        if provider in ("claude", "codex", "opencode"):
             break
-        print("    (type claude or codex)")
+        print("    (type claude, codex or opencode)")
     if provider == "codex":
         from harvey.codex import SUGGESTED_MODEL
         print(f"    {SUGGESTED_MODEL} is the Codex model Harvey has verified as text-only")
         print("    (no code-execution tools). Press Enter to use it, or type another.")
+    if provider == "opencode":
+        print("    OpenCode models use the provider/model form, e.g.")
+        print("    opencode-go/mimo-v2.5 or a cheap DeepSeek model from 'opencode models'.")
     while True:
         if provider == "codex":
             model = _ask("Model", default=SUGGESTED_MODEL, required=False)
+        elif provider == "opencode":
+            model = _ask(
+                "Model (provider/model; leave blank for the OpenCode default)",
+                required=False,
+            )
         else:
             model = _ask("Model (leave blank for the default)", required=False)
         try:
             return BrainConfig(provider=provider, model=model)
         except ValidationError:
-            print("    (that doesn't look like a model name — try again or leave blank)")
+            hint = ("use provider/model, e.g. opencode-go/mimo-v2.5"
+                    if provider == "opencode" else "try again or leave blank")
+            print(f"    (that doesn't look like a model name — {hint})")
 
 
 async def _test_instantly(api_key: str) -> bool:
@@ -190,6 +206,8 @@ class SetupWizard:
         self.brain_config = _ask_brain_config()
         if self.brain_config.provider == "codex":
             await self._check_codex()
+        elif self.brain_config.provider == "opencode":
+            await self._check_opencode()
         else:
             await self._check_claude()
 
@@ -211,7 +229,7 @@ class SetupWizard:
         state = StateManager()
         await state.init_db()
         brain = Brain(state, self.brain_config)
-        if await _test_claude(brain):
+        if await _test_brain(brain):
             print("✓ Working")
         else:
             print("✗ Failed")
@@ -261,12 +279,51 @@ class SetupWizard:
         state = StateManager()
         await state.init_db()
         brain = Brain(state, self.brain_config)
-        if await _test_claude(brain):
+        if await _test_brain(brain):
             print("✓ Working")
         else:
             print("✗ Failed")
             _print_harvey("Codex is installed but the test call failed. The log")
             _print_harvey("above says why (login, plan limits, or isolation).")
+            if not _ask_yes_no("Continue anyway?", default=False):
+                raise SystemExit(1)
+        self._check_python_packages()
+
+    async def _check_opencode(self):
+        from harvey.opencode import OpenCodeError, preflight as opencode_preflight
+
+        print("\n  Checking OpenCode CLI...", end=" ")
+        if _check_opencode_cli():
+            print("✓ Found")
+        else:
+            print("✗ Not found")
+            _print_harvey("I need the OpenCode CLI to think with your providers:")
+            print("         https://opencode.ai (see the install docs)")
+            print("\n         Then run 'opencode providers login' to add a provider,")
+            print("         and re-run this setup.")
+            raise SystemExit(1)
+
+        print("  Checking OpenCode version and login...", end=" ", flush=True)
+        try:
+            version = await opencode_preflight()
+            print(f"✓ {version}, credentials configured")
+        except OpenCodeError as e:
+            print("✗ Not ready")
+            _print_harvey(str(e))
+            raise SystemExit(1)
+
+        # A real call through the same one-shot path Harvey uses per prompt.
+        print("  Testing OpenCode...", end=" ", flush=True)
+        state = StateManager()
+        await state.init_db()
+        brain = Brain(state, self.brain_config)
+        if await _test_brain(brain):
+            print("✓ Working")
+        else:
+            print("✗ Failed")
+            _print_harvey("OpenCode is installed and logged in, but the test call")
+            _print_harvey("failed. Check the model name ('opencode models') and")
+            _print_harvey("provider credits, then re-run this setup.")
             if not _ask_yes_no("Continue anyway?", default=False):
                 raise SystemExit(1)
         self._check_python_packages()
@@ -657,10 +714,15 @@ class SetupWizard:
 """)
 
         # Show what's configured
+        provider = self.brain_config.provider
+        if provider == "codex":
+            brain_label, brain_ok = "Codex CLI (ChatGPT plan)", _check_codex_cli()
+        elif provider == "opencode":
+            brain_label, brain_ok = "OpenCode CLI", _check_opencode_cli()
+        else:
+            brain_label, brain_ok = "Claude Code CLI", _check_claude_cli()
         checks = {
-            ("Codex CLI (ChatGPT plan)" if self.brain_config.provider == "codex"
-             else "Claude Code CLI"): (_check_codex_cli() if self.brain_config.provider == "codex"
-                                      else _check_claude_cli()),
+            brain_label: brain_ok,
             "Instantly API": bool(self.env_vars.get("INSTANTLY_API_KEY")),
             "LinkedIn": bool(self.env_vars.get("LINKEDIN_EMAIL")),
             "Cloudflare Crawl": bool(self.env_vars.get("CLOUDFLARE_ACCOUNT_ID")),
