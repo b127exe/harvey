@@ -15,7 +15,7 @@ Add OpenCode as a third, opt-in brain provider. When `harvey.yaml` sets `brain.p
 
 1. As a fork owner with only an OpenCode subscription, I want Harvey to use OpenCode as its brain, so that the agent runs without Claude or Codex.
 2. As a Windows user, I want the OpenCode provider to work on Windows, so that I'm not blocked by the Codex platform refusal.
-3. As a Harvey operator, I want to set `brain.provider: opencode` and a free-form `brain.model` (e.g. `anthropic/claude-sonnet-4-5`) in `harvey.yaml`, so that I control which model OpenCode uses.
+3. As a Harvey operator, I want to set `brain.provider: opencode` and a free-form `brain.model` (e.g. a cheap capable model such as MiMo v2.5 or a DeepSeek model available through my OpenCode providers) in `harvey.yaml`, so that I control which model OpenCode uses.
 4. As a first-time setup user, I want `harvey setup` to offer opencode in the provider menu, check that `opencode` is on PATH, and ask for my model, so that I can configure Harvey without editing YAML by hand.
 5. As an operator running `harvey status --check`, I want an opencode preflight (CLI present + auth OK), so that I learn about a broken login before the heartbeat starts failing.
 6. As an operator, I want `harvey status` to show an "OpenCode calls today" counter, so that I can see agent activity at a glance.
@@ -75,6 +75,7 @@ Add OpenCode as a third, opt-in brain provider. When `harvey.yaml` sets `brain.p
 ## Further Notes
 
 - OpenCode CLI on this machine: v1.19.4, `run --format json` emits raw JSON events; `-m` takes `provider/model`; `--variant` exists for reasoning effort but is unused in v1.
+- Operator's intended models: MiMo v2.5 (and other MiMo variants) and cheap DeepSeek models reachable through OpenCode's providers — all pass through the free-form `provider/model` config unchanged; Harvey never hardcodes a model list.
 - The Claude one-shot loop in the brain module is the template; Codex's 1,500-line adapter is explicitly not the template.
 - Windows process kill semantics differ from POSIX; reuse the existing kill path and cover it in the timeout test.
 - Exact JSON event schema for final text/tokens must be confirmed with one live `opencode run --format json` during implementation (cost: one tiny prompt) before locking the parser tests' canned fixtures.
