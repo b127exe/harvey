@@ -73,6 +73,28 @@ def test_load_brain_config(tmp_path):
         load_brain_config(str(path))
 
 
+def test_opencode_is_an_accepted_provider():
+    cfg = BrainConfig(provider=" OpenCode ", model="opencode-go/mimo-v2.5")
+    assert (cfg.provider, cfg.model) == ("opencode", "opencode-go/mimo-v2.5")
+    assert BrainConfig(provider="opencode", model="").provider == "opencode"  # CLI default model
+
+
+def test_opencode_model_must_be_provider_slash_model():
+    for bad in ("mimo-v2.5", "--model", "opencode"):
+        with pytest.raises(ValidationError):
+            BrainConfig(provider="opencode", model=bad)
+    assert BrainConfig(provider="opencode", model="deepseek/deepseek-v4.1-flash").model == (
+        "deepseek/deepseek-v4.1-flash"
+    )
+
+
+def test_load_brain_config_accepts_opencode(tmp_path):
+    path = tmp_path / "harvey.yaml"
+    path.write_text(yaml.dump({"brain": {"provider": "opencode", "model": "opencode-go/mimo-v2.5"}}))
+    cfg = load_brain_config(str(path))
+    assert (cfg.provider, cfg.model) == ("opencode", "opencode-go/mimo-v2.5")
+
+
 # ── Claude path unchanged ──
 
 

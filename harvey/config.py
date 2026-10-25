@@ -205,7 +205,7 @@ class UsageConfig(BaseModel):
         return v
 
 
-BRAIN_PROVIDERS = ("claude", "codex")
+BRAIN_PROVIDERS = ("claude", "codex", "opencode")
 CODEX_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
 
 # Model names are passed to a CLI, so they must look like a model name and
@@ -217,9 +217,12 @@ class BrainConfig(BaseModel):
     """Which subscription Harvey thinks with.
 
     ``claude`` (default) runs Claude Code headless on your Claude plan.
-    ``codex`` runs Codex on your ChatGPT plan. There is never an automatic
+    ``codex`` runs Codex on your ChatGPT plan. ``opencode`` runs one-shot
+    ``opencode run`` calls on whatever providers ``opencode providers``
+    already holds (e.g. MiMo, DeepSeek). There is never an automatic
     fallback between them, and an explicit ``model`` only affects Harvey —
-    your own Claude Code / Codex settings are never read or changed.
+    your own Claude Code / Codex / OpenCode settings are never read or
+    changed.
     """
 
     provider: str = "claude"
@@ -255,6 +258,17 @@ class BrainConfig(BaseModel):
                 f"Use one of: {', '.join(CODEX_REASONING_EFFORTS)}."
             )
         return v
+
+    @model_validator(mode="after")
+    def _valid_opencode_model(self) -> "BrainConfig":
+        # OpenCode's -m flag takes provider/model; a bare name would fail at
+        # the CLI, so reject it here with a clearer error. Empty = CLI default.
+        if self.provider == "opencode" and self.model and "/" not in self.model:
+            raise ValueError(
+                f"'{self.model}' is not a valid OpenCode model. "
+                "Use the provider/model form, e.g. 'opencode-go/mimo-v2.5'."
+            )
+        return self
 
 
 class HarveyConfig(BaseModel):
