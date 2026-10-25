@@ -9,6 +9,13 @@ import harvey.opencode as oc
 from harvey.opencode import OpenCodeError, OpenCodeResult, parse_run_output
 
 
+@pytest.fixture(autouse=True)
+def _no_which(monkeypatch):
+    """Tests assert on the bare CLI name; live-path resolution is covered
+    separately."""
+    monkeypatch.setattr(oc.shutil, "which", lambda name: None)
+
+
 # ── event parsing (shape confirmed by a live capture) ──
 
 _LIVE_SHAPE = "\n".join([
@@ -229,3 +236,16 @@ async def test_preflight_no_credentials_is_auth_error(monkeypatch):
     with pytest.raises(OpenCodeError) as exc:
         await oc.preflight()
     assert exc.value.kind == "auth"
+
+
+def test_cli_resolution_prefers_the_which_path(monkeypatch):
+    """A bare 'opencode' breaks when the install path contains spaces (cmd
+    re-parses the .cmd shim unquoted); the full path from shutil.which does
+    not. Live-verified on Windows with a path under 'Author Software'."""
+    full = r"C:\Author Software\nvm\opencode.CMD"
+    monkeypatch.setattr(oc.shutil, "which", lambda name: full if name == "opencode" else None)
+    assert oc._cli_command() == full
+    cmd = oc.build_run_command("m/x", "hi", prompt_via_stdin=False)
+    assert cmd[0] == full
+    monkeypatch.setattr(oc.shutil, "which", lambda name: None)
+    assert oc._cli_command() == "opencode"

@@ -76,3 +76,10 @@ compliance:
     enabled: false
     sender_country: ""          # GB or US: where your business is based
     address_source: "unknown"   # published | bought | scraped | given | unknown
+
+# Which AI brain Harvey thinks with. OpenCode runs one-shot `opencode run`
+# calls against whatever `opencode providers` already holds (works on
+# Windows too). provider/model form, from `opencode models`.
+brain:
+  provider: opencode
+  model: opencode-go/mimo-v2.5

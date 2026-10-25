@@ -9,6 +9,26 @@ minor versions can still change behaviour.
 
 ### Added
 
+- **Opt-in OpenCode brain (any OS, your own providers).** Set
+  `brain.provider: opencode` (or pick it in `harvey setup`, or
+  `harvey train --provider opencode`) to think through the OpenCode CLI —
+  cheap capable models like MiMo v2.5 or DeepSeek via the free-form
+  `provider/model` in `brain.model`. Each call is a one-shot
+  `opencode run --format json` (JSON events parsed into text + token usage;
+  prompts over 8k chars travel on stdin), with no tools and no `--auto`, and
+  Harvey never reads or changes your OpenCode credentials, config or
+  sessions. Failures are classified (setup/auth/usage_limit/transient): a
+  missing CLI or missing credentials pauses the provider with a reason
+  (`harvey status --check` verifies version + credentials without a prompt),
+  rate limits pause for an hour, transient errors retry with backoff.
+  OpenCode calls count in a new `opencode_calls` usage column, appear in
+  `harvey status`/`harvey usage`, the dashboard (call chips, FAQ) and are
+  recorded per-call with tokens and the CLI-reported cost in
+  `usage_events(provider='opencode')`. There is no subscription quota gauge
+  (OpenCode has no usage API) — spend lives in `opencode stats`. Works on
+  Windows, macOS and Linux; Claude remains the default and there is no
+  automatic fallback. See the README section "Using OpenCode instead (any OS,
+  any providers)".
 - **Microsoft 365 mail provider.** Set `channels.email.provider: microsoft` to
   send and read through a Microsoft 365 / Outlook mailbox via Microsoft Graph,
   for domains whose mail lives in Exchange Online (which no longer accepts

@@ -11,12 +11,25 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 
 logger = logging.getLogger("harvey.opencode")
 
 OPENCODE_CLI = "opencode"
+
+
+def _cli_command() -> str:
+    """Executable to spawn: the full path when resolvable.
+
+    A bare ``opencode`` breaks on Windows when the install path contains a
+    space (cmd re-parses the .cmd shim unquoted and splits the path);
+    CreateProcess with the full ``shutil.which`` path does not.
+    """
+    return shutil.which(OPENCODE_CLI) or OPENCODE_CLI
+
+
 # Same Windows argv-limit trick as brain.py: longer prompts travel on stdin.
 _MAX_ARGV_PROMPT_CHARS = 8000
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -140,7 +153,7 @@ def parse_run_output(raw: str, model: str = "", duration_ms: int = 0) -> OpenCod
 
 
 def build_run_command(model: str, prompt: str, prompt_via_stdin: bool) -> list[str]:
-    cmd = [OPENCODE_CLI, "run", "--format", "json"]
+    cmd = [_cli_command(), "run", "--format", "json"]
     if model:
         cmd += ["-m", model]
     if not prompt_via_stdin:
@@ -214,7 +227,7 @@ async def preflight() -> str:
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            OPENCODE_CLI, "--version",
+            _cli_command(), "--version",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -234,7 +247,7 @@ async def preflight() -> str:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            OPENCODE_CLI, "providers", "list",
+            _cli_command(), "providers", "list",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

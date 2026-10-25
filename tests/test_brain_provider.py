@@ -107,6 +107,8 @@ _OPENCODE_OK = "\n".join([
 
 def _capture_opencode_exec(monkeypatch, returncode=0, stdout=None, stderr=b""):
     captured = {"calls": 0}
+    # Bare-name resolution is covered in test_opencode.py; keep argv stable.
+    monkeypatch.setattr("harvey.opencode.shutil.which", lambda name: None)
 
     async def fake_exec(*cmd, **kwargs):
         captured["calls"] += 1
@@ -226,6 +228,9 @@ async def test_opencode_timeout_kills_process(state, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_opencode_never_runs_claude_cli(state, monkeypatch):
+    import harvey.opencode as oc_mod
+    monkeypatch.setattr(oc_mod.shutil, "which", lambda name: None)
+
     async def only_opencode(*cmd, **kwargs):
         assert cmd[0] == "opencode", f"unexpected CLI: {cmd[0]}"
 
