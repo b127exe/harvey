@@ -555,10 +555,12 @@ async def get_stats():
         action_count = actions[0]["count"] if actions else 0
 
         usage = await query_db(
-            "SELECT claude_calls, codex_calls FROM usage_log WHERE date = date('now')"
+            "SELECT claude_calls, codex_calls, opencode_calls "
+            "FROM usage_log WHERE date = date('now')"
         )
         usage_today = (usage[0]["claude_calls"] or 0) if usage else 0
         codex_today = (usage[0]["codex_calls"] or 0) if usage else 0
+        opencode_today = (usage[0]["opencode_calls"] or 0) if usage else 0
 
         return {
             "prospects": {"total": prospect_total, "by_status": prospect_map},
@@ -567,6 +569,7 @@ async def get_stats():
             "actions_total": action_count,
             "claude_calls_today": usage_today,
             "codex_calls_today": codex_today,
+            "opencode_calls_today": opencode_today,
             "brain_provider": _active_provider(),
             "brain_status": await _brain_status(),
         }

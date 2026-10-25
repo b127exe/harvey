@@ -888,18 +888,25 @@ async function loadStats() {
 // Calls today per subscription — each labelled with the provider it ran on.
 function brainCallChips(data) {
   const chip = (label, n) => '<span class="chip">' + label + ' calls today <b>' + escHtml(String(n || 0)) + '</b></span>';
-  const codex = data.codex_calls_today || 0;
+  const NAMES = { claude: 'Claude', codex: 'Codex', opencode: 'OpenCode' };
+  const counts = {
+    claude: data.claude_calls_today || 0,
+    codex: data.codex_calls_today || 0,
+    opencode: data.opencode_calls_today || 0,
+  };
+  const active = counts[data.brain_provider] !== undefined ? data.brain_provider : 'claude';
   const st = data.brain_status || {};
   // A paused brain must not look healthy: say so, and why.
   const paused = st.status === 'paused'
     ? '<span class="chip" title="' + escHtml(st.reason || '') + '">' +
-      escHtml(st.provider === 'codex' ? 'Codex' : 'Brain') + ' <b>paused</b>: ' +
+      escHtml(NAMES[st.provider] || 'Brain') + ' <b>paused</b>: ' +
       escHtml((st.reason || '').slice(0, 120)) + '</span>'
     : '';
-  if (data.brain_provider === 'codex') {
-    return paused + chip('Codex', codex) + (data.claude_calls_today ? chip('Claude', data.claude_calls_today) : '');
+  let out = paused + chip(NAMES[active], counts[active]);
+  for (const p of Object.keys(counts)) {
+    if (p !== active && counts[p]) out += chip(NAMES[p], counts[p]);
   }
-  return paused + chip('Claude', data.claude_calls_today) + (codex ? chip('Codex', codex) : '');
+  return out;
 }
 
 function fmtTokens(n) {
@@ -926,13 +933,22 @@ function emailTag(p) {
 function quotaCardHtml(data) {
   const provider = data && data.quota_provider;
   if (!provider) return '';
-  const title = provider === 'codex' ? 'Codex (ChatGPT plan) Quota' : 'Claude Subscription Quota';
+  const TITLES = {
+    codex: 'Codex (ChatGPT plan) Quota',
+    claude: 'Claude Subscription Quota',
+    opencode: 'OpenCode',
+  };
+  const UNAVAILABLE = {
+    codex: "Quota unavailable: Harvey couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network).",
+    claude: "Quota unavailable: Harvey couldn't read your Claude subscription's limits (check claude login and network).",
+    opencode: "Quota unavailable: OpenCode has no subscription usage API - spend lives outside Harvey (see 'opencode stats' and your provider dashboard).",
+  };
+  const title = TITLES[provider] || 'Claude Subscription Quota';
   let html = '<h2>' + escHtml(title) + '</h2>';
   if (!data.quota || !Object.keys(data.quota).length) {
-    const why = provider === 'codex'
-      ? "Quota unavailable: Harvey couldn't read your ChatGPT plan's limits (check codex login, the Codex CLI version, and network)."
-      : "Quota unavailable: Harvey couldn't read your Claude subscription's limits (check claude login and network).";
-    return html + '<p class="muted">' + escHtml(why) + ' Until it can, budgets count Harvey\'s own calls.</p>';
+    const why = UNAVAILABLE[provider] || UNAVAILABLE.claude;
+    const tail = provider === 'opencode' ? '' : " Until it can, budgets count Harvey's own calls.";
+    return html + '<p class="muted">' + escHtml(why) + tail + '</p>';
   }
   const labels = {five_hour: '5-hour window', seven_day: 'Weekly', primary: 'Primary window',
                   secondary: 'Secondary window', limit_reached: 'Usage limit reached'};

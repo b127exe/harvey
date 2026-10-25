@@ -407,6 +407,11 @@
     </details>
 
     <details>
+      <summary>OpenCode calls fail</summary>
+      <div class="faq-body">With <code>brain.provider: opencode</code>, set <code>brain.model</code> to the <code>provider/model</code> form (for example <code>opencode-go/mimo-v2.5</code>, or a cheap DeepSeek model listed by <code>opencode models</code>), or leave it blank to use OpenCode's default. Install the CLI from <a href="https://opencode.ai" target="_blank" rel="noopener">opencode.ai</a> and add a provider with <code>opencode providers login</code>; Harvey never manages those credentials itself. <code>harvey status --check</code> verifies the CLI version and credentials without sending a prompt. OpenCode works on Windows, macOS and Linux (unlike Codex). There is no subscription quota gauge in Harvey: spend lives in <code>opencode stats</code> and your provider dashboard. While OpenCode can't be used, Harvey pauses (the Actions card shows "OpenCode paused" and why) and resumes once it's fixed; Harvey never falls back to Claude on its own.</div>
+    </details>
+
+    <details>
       <summary>Harvey isn't finding prospects</summary>
       <div class="faq-body">Check that your ICP (ideal customer profile) in harvey.yaml has realistic titles, industries, and geography. If LinkedIn is set up, check that the credentials are correct. Check the Activity tab to see what Harvey has been trying to do.</div>
     </details>

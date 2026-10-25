@@ -1085,3 +1085,63 @@ def test_cli_train_accepts_opencode_provider(monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
     assert exit_info.value.code == 2
+
+
+# ── dashboard + web for OpenCode ──
+
+
+def test_dashboard_opencode_stats_usage_and_chips(client, monkeypatch):
+    monkeypatch.setattr(dash, "_active_brain",
+                        lambda: BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5"))
+    asyncio.run(StateManager(str(client.db_path)).record_usage_event(
+        provider="opencode", model="opencode-go/mimo-v2.5", output_tokens=7))
+
+    stats = client.get("/api/stats").json()
+    assert stats["brain_provider"] == "opencode"
+    assert stats["opencode_calls_today"] == 0  # counter column, not usage_events
+    chips = _render_js("brainCallChips", stats)
+    assert "OpenCode calls today" in chips
+
+    usage = client.get("/api/usage").json()
+    assert usage["provider"] == "opencode"
+    assert usage["quota_provider"] == "opencode"
+    assert usage["quota_status"] == "unavailable"  # no gauge to fake
+    assert usage["quota"] is None
+    assert [r["provider"] for r in usage["by_provider"]] == ["opencode"]
+
+
+def test_dashboard_opencode_counts_use_the_usage_log_column(client, monkeypatch):
+    monkeypatch.setattr(dash, "_active_brain", lambda: BrainConfig(provider="opencode"))
+
+    async def bump():
+        sm = StateManager(str(client.db_path))
+        await sm.increment_usage(provider="opencode")
+        await sm.increment_usage(provider="opencode")
+
+    asyncio.run(bump())
+    stats = client.get("/api/stats").json()
+    assert stats["opencode_calls_today"] == 2
+    assert stats["claude_calls_today"] == 0 and stats["codex_calls_today"] == 0
+
+
+def test_quota_card_renders_unavailable_opencode():
+    html = _render_quota_card({"quota_provider": "opencode", "quota_status": "unavailable",
+                               "quota": None})
+    assert "OpenCode" in html
+    assert "unavailable" in html.lower()
+    assert "opencode stats" in html  # where spend actually lives
+    assert "progress-bar" not in html
+
+
+def test_paused_opencode_brain_is_named_on_the_dashboard(client, monkeypatch):
+    asyncio.run(StateManager(str(client.db_path)).set_setting(
+        brain_mod.BRAIN_STATUS_KEY,
+        '{"provider": "opencode", "status": "paused", "kind": "auth", '
+        '"reason": "No OpenCode credentials configured.", '
+        '"since": "2026-10-25T12:00:00Z"}'))
+    monkeypatch.setattr(dash, "_active_brain", lambda: BrainConfig(provider="opencode"))
+    stats = client.get("/api/stats").json()
+    assert stats["brain_status"]["status"] == "paused"
+    html = _render_js("brainCallChips", stats)
+    assert "OpenCode <b>paused</b>" in html
+    assert "No OpenCode credentials" in html
