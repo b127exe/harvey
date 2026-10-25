@@ -95,6 +95,155 @@ def test_load_brain_config_accepts_opencode(tmp_path):
     assert (cfg.provider, cfg.model) == ("opencode", "opencode-go/mimo-v2.5")
 
 
+# ── OpenCode path ──
+
+
+_OPENCODE_OK = "\n".join([
+    '{"type":"text","part":{"type":"text","text":"scored"}}',
+    '{"type":"step_finish","part":{"type":"step-finish","tokens":{"total":10,'
+    '"input":8,"output":2},"cost":0.001}}',
+])
+
+
+def _capture_opencode_exec(monkeypatch, returncode=0, stdout=None, stderr=b""):
+    captured = {"calls": 0}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["calls"] += 1
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+
+        class _Proc:
+            def __init__(self):
+                self.returncode = returncode
+                self.killed = False
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                return returncode
+
+            async def communicate(self, data=None):
+                captured["stdin_data"] = data
+                return stdout if stdout is not None else _OPENCODE_OK.encode(), stderr
+
+        captured["proc"] = _Proc()
+        return captured["proc"]
+
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_exec)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_opencode_brain_dispatches_and_records_usage(state, monkeypatch):
+    captured = _capture_opencode_exec(monkeypatch)
+    brain = Brain(state, BrainConfig(provider="opencode", model="opencode-go/mimo-v2.5"))
+    assert brain.provider_label == "OpenCode"
+    assert await brain.think("hi", agent="scout", task="score") == "scored"
+    assert captured["cmd"][0] == "opencode"
+    assert captured["cmd"][1:4] == ["run", "--format", "json"]
+    assert captured["cmd"][captured["cmd"].index("-m") + 1] == "opencode-go/mimo-v2.5"
+    assert await state.get_usage_today("opencode") == 1
+    assert await state.get_usage_today("claude") == 0
+    rows = await state.usage_by_provider(days=1)
+    assert [r["provider"] for r in rows] == ["opencode"]
+    assert rows[0]["input_tokens"] == 8
+    summary = await state.get_state_summary()
+    assert summary["usage_today_by_provider"]["opencode"] == 1
+
+
+@pytest.mark.asyncio
+async def test_opencode_auth_error_pauses_brain(state, monkeypatch):
+    captured = _capture_opencode_exec(
+        monkeypatch, returncode=1, stderr=b"Error: please log in with opencode auth"
+    )
+    brain = Brain(state, BrainConfig(provider="opencode"))
+    assert await brain.think("hi", max_retries=0) == ""
+    assert captured["calls"] == 1  # non-retryable: no second attempt
+    assert brain.unavailable
+    assert "auth" in brain.paused_reason.lower() or "log" in brain.paused_reason.lower()
+    # Paused: the next call must not spawn another CLI process.
+    assert await brain.think("hi") == ""
+    assert captured["calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_opencode_transient_error_retries_then_gives_up(state, monkeypatch):
+    captured = _capture_opencode_exec(
+        monkeypatch, returncode=1, stderr=b"connection reset by peer"
+    )
+    brain = Brain(state, BrainConfig(provider="opencode"))
+    # Force zero backoff so the test stays fast.
+    monkeypatch.setattr(brain_mod, "RETRY_BASE_DELAY", 0)
+    assert await brain.think("hi", max_retries=2) == ""
+    assert captured["calls"] == 3  # initial + 2 retries
+    assert not brain.unavailable  # transient failures never pause
+
+
+@pytest.mark.asyncio
+async def test_opencode_usage_limit_pauses_instead_of_retrying(state, monkeypatch):
+    captured = _capture_opencode_exec(
+        monkeypatch, returncode=1, stderr=b"429 rate limit exceeded"
+    )
+    brain = Brain(state, BrainConfig(provider="opencode"))
+    monkeypatch.setattr(brain_mod, "RETRY_BASE_DELAY", 0)
+    assert await brain.think("hi", max_retries=3) == ""
+    assert captured["calls"] == 1  # no retries against an exhausted account
+    assert "usage limit" in brain.paused_reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_opencode_timeout_kills_process(state, monkeypatch):
+    captured = _capture_opencode_exec(monkeypatch)  # replaced below with a hang
+    captured["calls"] = 0  # the hang factory takes over
+
+    async def hanging_exec(*cmd, **kwargs):
+        class _Proc:
+            returncode = 0
+            killed = False
+
+            def kill(self):
+                self.killed = True
+
+            async def wait(self):
+                return 0
+
+            async def communicate(self, data=None):
+                await asyncio.sleep(3600)
+
+        captured["proc"] = _Proc()
+        captured["calls"] += 1
+        return captured["proc"]
+
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", hanging_exec)
+    brain = Brain(state, BrainConfig(provider="opencode"))
+    monkeypatch.setattr(brain_mod, "RETRY_BASE_DELAY", 0)
+    assert await brain.think("hi", max_retries=0, timeout=0.05) == ""
+    assert captured["proc"].killed is True
+    assert not brain.unavailable  # a timeout is transient, not a pause
+
+
+@pytest.mark.asyncio
+async def test_opencode_never_runs_claude_cli(state, monkeypatch):
+    async def only_opencode(*cmd, **kwargs):
+        assert cmd[0] == "opencode", f"unexpected CLI: {cmd[0]}"
+
+        class _Proc:
+            returncode = 0
+
+            async def communicate(self, data=None):
+                return _OPENCODE_OK.encode(), b""
+
+            def kill(self):
+                pass
+
+        return _Proc()
+
+    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", only_opencode)
+    assert await Brain(state, BrainConfig(provider="opencode")).think("hi") == "scored"
+
+
 # ── Claude path unchanged ──
 
 
@@ -388,7 +537,7 @@ async def test_existing_usage_rows_become_claude(tmp_path):
     assert await sm.get_usage_today("codex") == 0
     summary = await sm.get_state_summary()
     assert summary["usage_today"] == 7
-    assert summary["usage_today_by_provider"] == {"claude": 7, "codex": 0}
+    assert summary["usage_today_by_provider"] == {"claude": 7, "codex": 0, "opencode": 0}
     with pytest.raises(ValueError):
         await sm.record_usage_event(provider="gemini")
 

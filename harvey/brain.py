@@ -39,7 +39,7 @@ _NON_RETRYABLE_PATTERNS = (
 )
 
 
-PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex"}
+PROVIDER_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 # Settings key holding the brain's last health transition, for `harvey
 # status` and the dashboard: {"provider", "status": "ok"|"paused", "reason",
@@ -50,6 +50,8 @@ BRAIN_STATUS_KEY = "brain_status"
 # CLI version, model choice, an unsafe Codex config layer). After one, the
 # Brain stops starting runtimes until something changes.
 _PERSISTENT_CODEX_KINDS = {"setup", "auth", "isolation"}
+# OpenCode's taxonomy has no isolation layer; the same two pause it.
+_OPENCODE_PERSISTENT_KINDS = ("setup", "auth")
 # Re-check a paused provider at least this often even if nothing changed
 # on disk (e.g. a managed config layer was fixed).
 PROVIDER_RECHECK_SECONDS = 1800
@@ -197,7 +199,12 @@ class Brain:
         first = not self.unavailable or self.unavailable != str(error)
         self.unavailable = str(error)
         self._unavailable_at = time.monotonic()
-        self._unavailable_fingerprint = self.codex.fingerprint()
+        # Codex has a rich runtime fingerprint; the one-shot providers only
+        # need enough to notice a config change (provider + model).
+        if self.codex is not None:
+            self._unavailable_fingerprint = self.codex.fingerprint()
+        else:
+            self._unavailable_fingerprint = (self.provider, self.model)
         if first:
             await self._record_status("paused", self.unavailable,
                                       kind=getattr(error, "kind", ""))
@@ -239,6 +246,11 @@ class Brain:
         """
         if self.provider == "codex":
             return await self._think_codex(
+                prompt, session_id=session_id, timeout=timeout,
+                max_retries=max_retries, agent=agent, task=task,
+            )
+        if self.provider == "opencode":
+            return await self._think_opencode(
                 prompt, session_id=session_id, timeout=timeout,
                 max_retries=max_retries, agent=agent, task=task,
             )
@@ -456,6 +468,87 @@ class Brain:
             source="codex_app_server",
             provider="codex",
             **result.usage,
+        )
+
+    async def _think_opencode(
+        self,
+        prompt: str,
+        session_id: str | None,
+        timeout: float,
+        max_retries: int,
+        agent: str,
+        task: str,
+    ) -> str:
+        """One-shot ``opencode run`` per attempt (see harvey/opencode.py)."""
+        from harvey.opencode import OpenCodeError, run as opencode_run
+
+        paused = self.paused_reason
+        if paused:
+            logger.debug(f"OpenCode call skipped: {paused}")
+            return ""
+        logger.debug(f"Brain call via OpenCode (label={session_id})")
+        last_error = ""
+        for attempt in range(max_retries + 1):
+            if attempt > 0:
+                delay = RETRY_BASE_DELAY * (2 ** (attempt - 1))
+                logger.info(
+                    f"Retrying OpenCode call in {delay:.0f}s "
+                    f"(attempt {attempt + 1}/{max_retries + 1})..."
+                )
+                await asyncio.sleep(delay)
+            try:
+                result = await opencode_run(prompt, model=self.model, timeout=timeout)
+            except OpenCodeError as e:
+                last_error = str(e)
+                if e.kind == "usage_limit":
+                    # Check before retryable: the adapter marks these
+                    # retryable, but retrying an exhausted account is futile.
+                    logger.error(f"OpenCode usage limit hit: {e}")
+                    await self._start_usage_pause()
+                    return ""
+                if e.retryable:
+                    logger.warning(f"OpenCode call failed: {e}")
+                    continue
+                logger.error(f"OpenCode call failed: {e}")
+                if e.kind in _OPENCODE_PERSISTENT_KINDS:
+                    await self._mark_unavailable(e)
+                return ""
+            except Exception as e:
+                logger.error(f"OpenCode call failed unexpectedly ({type(e).__name__}).")
+                return ""
+
+            try:
+                await self.state.increment_usage(provider="opencode")
+            except Exception as e:
+                logger.warning(f"Failed to record usage counter: {e}")
+            try:
+                await self._record_opencode_usage(result, agent=agent, task=task,
+                                                  label=session_id or "")
+            except Exception as e:
+                logger.warning(f"Failed to record usage event: {e}")
+            return result.text
+
+        logger.error(
+            f"OpenCode call failed after {max_retries + 1} attempts. "
+            f"Last error: {str(last_error)[:200]}"
+        )
+        return ""
+
+    async def _record_opencode_usage(self, result, agent: str, task: str, label: str):
+        """One usage row per OpenCode call; cost comes from the CLI events."""
+        if not agent and label.startswith("harvey-"):
+            agent = label[len("harvey-"):].split("-")[0]
+        await self.state.record_usage_event(
+            agent=agent,
+            task=task or label,
+            model=result.model or self.model,
+            duration_ms=result.duration_ms,
+            num_turns=1,
+            source="opencode_run",
+            provider="opencode",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            cost_usd=float(result.cost_usd or 0.0),
         )
 
     @staticmethod
